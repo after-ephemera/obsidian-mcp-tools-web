@@ -23,13 +23,35 @@ async function main() {
     // Enable CORS for all routes
     app.use(cors());
 
-    // Health check endpoint
+    // API key authentication middleware
+    const authenticateApiKey: express.RequestHandler = (req, res, next) => {
+      // Check for API key in multiple locations
+      const providedKey =
+        req.headers.authorization?.replace(/^Bearer\s+/i, '') ||
+        req.headers['x-api-key'] ||
+        req.query.api_key;
+
+      if (!providedKey || providedKey !== API_KEY) {
+        logger.warn("Unauthorized request - invalid or missing API key", {
+          path: req.path,
+          hasAuth: !!req.headers.authorization,
+          hasApiKeyHeader: !!req.headers['x-api-key'],
+          hasApiKeyQuery: !!req.query.api_key
+        });
+        res.status(401).json({ error: "Unauthorized - Invalid or missing API key" });
+        return;
+      }
+
+      next();
+    };
+
+    // Health check endpoint (no authentication required)
     app.get("/health", (req, res) => {
       res.json({ status: "ok", version: getVersion() });
     });
 
-    // SSE endpoint for establishing connections
-    app.get("/sse", async (req, res) => {
+    // SSE endpoint for establishing connections (protected)
+    app.get("/sse", authenticateApiKey, async (req, res) => {
       try {
         await mcpServer.handleSSEConnection(req, res);
       } catch (error) {
@@ -42,8 +64,8 @@ async function main() {
       }
     });
 
-    // POST endpoint for receiving messages
-    app.post("/message", async (req, res) => {
+    // POST endpoint for receiving messages (protected)
+    app.post("/message", authenticateApiKey, async (req, res) => {
       console.log("Message received", req.body);
       try {
         await mcpServer.handlePostMessage(req, res);
