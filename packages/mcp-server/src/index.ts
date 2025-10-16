@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { logger } from "$/shared";
+import { logger, createOAuthManagerFromEnv, type OAuthTokenManager } from "$/shared";
 import { ObsidianMcpServer } from "./features/core";
 import { getVersion } from "./features/version" with { type: "macro" };
 import express from "express";
@@ -7,10 +7,14 @@ import cors from "cors";
 
 async function main() {
   try {
-    // Verify required environment variables
+    // Verify required environment variables - either API key OR OAuth credentials
     const API_KEY = process.env.OBSIDIAN_API_KEY;
-    if (!API_KEY) {
-      throw new Error("OBSIDIAN_API_KEY environment variable is required");
+    const oauthManager = createOAuthManagerFromEnv();
+
+    if (!API_KEY && !oauthManager) {
+      throw new Error(
+        "Either OBSIDIAN_API_KEY or OAuth credentials (OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_TOKEN_ENDPOINT) must be provided"
+      );
     }
 
     const PORT = parseInt(process.env.PORT || "3000", 10);
@@ -23,26 +27,45 @@ async function main() {
     // Enable CORS for all routes
     app.use(cors());
 
-    // API key authentication middleware
-    const authenticateApiKey: express.RequestHandler = (req, res, next) => {
+    // Authentication middleware - supports both API key and OAuth token
+    const authenticateApiKey: express.RequestHandler = async (req, res, next) => {
       // Check for API key in multiple locations
       const providedKey =
         req.headers.authorization?.replace(/^Bearer\s+/i, '') ||
         req.headers['x-api-key'] ||
         req.query.api_key;
 
-      if (!providedKey || providedKey !== API_KEY) {
-        logger.warn("Unauthorized request - invalid or missing API key", {
-          path: req.path,
-          hasAuth: !!req.headers.authorization,
-          hasApiKeyHeader: !!req.headers['x-api-key'],
-          hasApiKeyQuery: !!req.query.api_key
-        });
-        res.status(401).json({ error: "Unauthorized - Invalid or missing API key" });
-        return;
+      // If API key is configured, validate it
+      if (API_KEY) {
+        if (providedKey === API_KEY) {
+          next();
+          return;
+        }
       }
 
-      next();
+      // If OAuth is configured, validate OAuth token
+      if (oauthManager) {
+        try {
+          const validToken = await oauthManager.getToken();
+          if (providedKey === validToken) {
+            next();
+            return;
+          }
+        } catch (error) {
+          logger.error("OAuth token validation failed", { error });
+        }
+      }
+
+      // If we get here, authentication failed
+      logger.warn("Unauthorized request - invalid or missing credentials", {
+        path: req.path,
+        hasAuth: !!req.headers.authorization,
+        hasApiKeyHeader: !!req.headers['x-api-key'],
+        hasApiKeyQuery: !!req.query.api_key,
+        hasApiKey: !!API_KEY,
+        hasOAuth: !!oauthManager
+      });
+      res.status(401).json({ error: "Unauthorized - Invalid or missing credentials" });
     };
 
     // Health check endpoint (no authentication required)
